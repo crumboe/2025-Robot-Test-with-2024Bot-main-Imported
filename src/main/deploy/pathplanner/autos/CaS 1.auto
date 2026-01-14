@@ -1,0 +1,43 @@
+{
+  "version": "2025.0",
+  "command": {
+    "type": "sequential",
+    "data": {
+      "commands": [
+        {
+          "type": "named",
+          "data": {
+            "name": "StopShoot"
+          }
+        },
+        {
+          "type": "named",
+          "data": {
+            "name": "ChangeTargetHopper"
+          }
+        },
+        {
+          "type": "path",
+          "data": {
+            "pathName": "CaS 1"
+          }
+        },
+        {
+          "type": "named",
+          "data": {
+            "name": "ShootAtTarget"
+          }
+        },
+        {
+          "type": "path",
+          "data": {
+            "pathName": "cas2"
+          }
+        }
+      ]
+    }
+  },
+  "resetOdom": true,
+  "folder": null,
+  "choreoAuto": false
+}
