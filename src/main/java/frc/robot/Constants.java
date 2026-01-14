@@ -9,6 +9,7 @@ import edu.wpi.first.apriltag.AprilTagFields;
 import edu.wpi.first.math.geometry.Rotation3d;
 import edu.wpi.first.math.geometry.Transform3d;
 import edu.wpi.first.math.geometry.Translation3d;
+import edu.wpi.first.math.geometry.Pose3d;
 
 import edu.wpi.first.math.geometry.Translation2d;
 import edu.wpi.first.math.kinematics.SwerveDriveKinematics;
@@ -21,6 +22,22 @@ import edu.wpi.first.math.util.Units;
 
 
 public class Constants {
+    public static final Transform3d RED_ALLIANCE_COORDINATE_TRANSFORM = new Transform3d(
+        new Translation3d(16.54175, 8.0137, 0.0),
+        new Rotation3d(0.0, 0.0, Math.toRadians(180.0))
+        );
+    public static final double FIELD_LENGTH = Units.inchesToMeters(651.25);
+    public static final double FIELD_WIDTH = Units.inchesToMeters(317.69);
+    public static final Pose3d HopperPose = new Pose3d(new Translation3d(Units.inchesToMeters(181.56),
+                                                                    FIELD_WIDTH/2, 
+                                                                    Units.inchesToMeters(50)),new Rotation3d(0,0,0));
+    public static final Pose3d nearfieldLeftPose = new Pose3d(new Translation3d(Units.inchesToMeters(110),
+                                                                    Units.inchesToMeters(210.32), 
+                                                                    Units.inchesToMeters(0)),new Rotation3d(0,0,0));
+    public static final Pose3d nearfieldRightPose = new Pose3d(new Translation3d(Units.inchesToMeters(110),
+                                                                    Units.inchesToMeters(90.32), 
+                                                                    Units.inchesToMeters(0)),new Rotation3d(0,0,0));
+    public static final double LOCAL_ZONE_X_LIMIT = Units.inchesToMeters(156);
     public static final int NAVXGYROENUM = 0;
     public static final int PIGEONGYROENUM =1;
     public static final double PP103DistErrorLim = 2;

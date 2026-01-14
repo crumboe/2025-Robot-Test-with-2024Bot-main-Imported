@@ -1,32 +1,134 @@
 
 package frc.robot.commands;
 
-import com.pathplanner.lib.auto.AutoBuilder;
-// import com.pathplanner.lib.auto.AutoBuilder;
-import com.pathplanner.lib.path.GoalEndState;
-import com.pathplanner.lib.path.IdealStartingState;
-import com.pathplanner.lib.path.PathConstraints;
+/**
+ * GENETIC ALGORITHM FOR PID TUNING
+ * 
+ * OVERVIEW:
+ * This command implements a Genetic Algorithm (GA) to automatically optimize PID controller gains
+ * for swerve drive path following. Instead of manually tuning 6 PID parameters (translational P/I/D
+ * and rotational P/I/D), we use evolution to search the parameter space and find gains that minimize
+ * tracking error across a set of test paths.
+ * 
+ * WHAT IS A GENETIC ALGORITHM?
+ * A genetic algorithm is a metaheuristic optimization technique inspired by natural selection and
+ * evolution. It works by:
+ * 
+ * 1. POPULATION: Start with a set of candidate solutions (individuals). Each individual represents
+ *    a complete set of PID gains that could control the robot.
+ * 
+ * 2. FITNESS: Evaluate how good each individual is. In our case, we run the robot on test paths
+ *    and measure the total tracking error (cost function). Lower cost = better fitness.
+ * 
+ * 3. SELECTION: Pick the best individuals (high fitness) as parents to create the next generation.
+ *    We use tournament selection: randomly pick k candidates and keep the best one.
+ * 
+ * 4. CROSSOVER: Combine two parent genomes to create offspring. We use blend crossover (BLX-alpha):
+ *    take the range between two parent values and expand it slightly, then sample a new value.
+ *    This creates children that inherit traits from both parents but can exceed both values.
+ * 
+ * 5. MUTATION: Introduce random changes to offspring genes. We apply Gaussian mutations: add
+ *    small random noise to each parameter with a set probability. This prevents convergence to
+ *    local minima and explores the search space.
+ * 
+ * 6. REPEAT: Keep the best individuals (elitism), breed new offspring from the survivors, and
+ *    repeat for multiple generations until the best individual stops improving.
+ * 
+ * ADVANTAGES OF GENETIC ALGORITHMS:
+ * - Gradient-free: No need to compute derivatives; works with non-smooth fitness landscapes
+ * - Multi-dimensional search: Can optimize 6 PID parameters simultaneously
+ * - Parallelizable: Could evaluate multiple individuals concurrently on different paths
+ * - Robust: Less likely to get stuck in local minima due to crossover and mutation
+ * - Domain-agnostic: No special knowledge about PID control needed
+ * 
+ * HOW WE USE IT FOR PID TUNING:
+ * 
+ * GENOME REPRESENTATION:
+ * Each individual's genome contains 6 double values:
+ *   [transP, transI, transD, rotP, rotI, rotD]
+ * 
+ * These are the PID gains for:
+ *   - Translation (X, Y position errors): P (proportional), I (integral), D (derivative)
+ *   - Rotation (heading error): P, I, D
+ * 
+ * FITNESS FUNCTION:
+ * We measure fitness by running each individual on NUM_PATHS test paths (typically 6 different
+ * trajectories). For each path:
+ *   - Apply the individual's PID gains to the controller
+ *   - Execute the path and accumulate error costs from PathPlanner's cost function
+ *   - If error exceeds a threshold, abort early and penalize heavily (prevents wild oscillations)
+ * 
+ * Total fitness = sum of costs across all paths
+ * Lower cost = better PID tuning = better fitness
+ * 
+ * ALGORITHM FLOW:
+ * 1. Initialize population with:
+ *    - 1 elite seeded with the best known gains from last run
+ *    - 2 variants of that elite (jittered slightly)
+ *    - 3 random individuals (explore new regions of parameter space)
+ * 
+ * 2. For each generation:
+ *    a) Evaluate all individuals on all test paths
+ *    b) Sort by fitness (lower cost is better)
+ *    c) Report best individual's gains and cost
+ *    d) Select elite individuals to preserve unchanged
+ *    e) Fill remainder of population by:
+ *       - Tournament selection: pick 2 parents from best individuals
+ *       - Crossover: blend their genes to create offspring
+ *       - Mutation: randomly perturb offspring genes
+ *    f) Repeat with new generation
+ * 
+ * 3. After GENERATIONS iterations:
+ *    - Save best individual's PID gains to persistent preferences
+ *    - Next run can seed with these improved values
+ * 
+ * PARAMETERS TO TUNE:
+ * - MUTATION_RATE: Probability each gene mutates (0.30 = 30% chance per gene)
+ * - MUTATION_SIGMA: Size of mutations as fraction of parameter range (0.20 = 20% of range)
+ * - ELITES: How many top individuals to preserve (3 keeps the 3 best)
+ * - GENERATIONS: How many evolution rounds (15 is conservative; more = better but slower)
+ * - ALLOWABLE_COST: Abort threshold to prevent bad PID gains from running entire path
+ * 
+ * PRACTICAL USAGE:
+ * 1. Create test paths that represent realistic driving scenarios
+ * 2. Enable this command in teleop or a special diagnostic mode
+ * 3. Let it run for several generations (5-15 minutes depending on path complexity)
+ * 4. Monitor SmartDashboard to watch best cost decrease each generation
+ * 5. Once converged (cost stops improving), save the best PID gains
+ * 6. Use the improved gains in your main controller
+ * 
+ * CONVERGENCE INDICATORS:
+ * - Best cost is decreasing each generation
+ * - Best cost is stabilizing (plateauing)
+ * - Population diversity is maintained (not all identical)
+ * 
+ * When to stop:
+ * - After GENERATIONS iterations, algorithm automatically stops
+ * - Or manually disable via setRunning(false) if satisfied with current gains
+ * 
+ * LIMITATIONS & CONSIDERATIONS:
+ * - Only as good as your fitness function and test paths
+ * - May overfit to test paths and perform poorly on new trajectories
+ * - Evaluation is slower than manual tuning (many path runs)
+ * - No guarantee of global optimum (may find local optimum)
+ * - Environmental factors (battery voltage, traction) change optimal gains
+ * 
+ * REFERENCES:
+ * - Wikipedia: Genetic Algorithm
+ * - "Introduction to Genetic Algorithms" - David Goldberg
+ * - For robotics: "Evolutionary Robotics" - Nolfi & Floreano
+ */
+
 import com.pathplanner.lib.path.PathPlannerPath;
-// import com.pathplanner.lib.path.PathPoint;
 
 import edu.wpi.first.wpilibj.DriverStation;
 import edu.wpi.first.wpilibj.Preferences;
 import edu.wpi.first.wpilibj.smartdashboard.SmartDashboard;
 import edu.wpi.first.wpilibj2.command.Command;
 import frc.robot.Constants.DriveConstants.FrameConstants;
-// import edu.wpi.first.wpilibj2.command.Commands;
 import frc.robot.subsystems.Locomotion.Drive;
 import frc.robot.subsystems.ultilities.FollowPathCommand103;
-// import com.pathplanner.lib.config.RobotConfig;
-// import com.pathplanner.lib.pathfinding.Pathfinder;
-// import com.pathplanner.lib.pathfinding.Pathfinding;
-// import com.pathplanner.lib.path.PathPlannerPath;
-import edu.wpi.first.math.geometry.Pose2d;
-import edu.wpi.first.math.geometry.Rotation2d;
-// import edu.wpi.first.math.geometry.Translation2d;
-// 
-import com.pathplanner.lib.path.Waypoint;
-// import java.nio.file.Path;
+
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
@@ -34,231 +136,243 @@ import java.util.Optional;
 import java.util.Random;
 
 public class flowerTest extends Command {
-  // -------------------- CONFIG --------------------
+  // -------------------- CONFIGURATION --------------------
+  // Number of test paths to evaluate each individual on
   private static final int NUM_PATHS = 6;
 
-  // GA hyperparameters (start conservative)
+  // Genetic Algorithm hyperparameters
+  // Population size for each generation
   private static final int POP_SIZE = 6;
+  // Number of elite individuals to preserve
   private static final int ELITES = 3;
+  // Total generations to evolve
   private static final int GENERATIONS = 15;
+  // Probability of mutation per gene
   private static final double MUTATION_RATE = 0.30;
-  private static final double MUTATION_SIGMA = 0.20;  // percentage of range
+  // Mutation magnitude as fraction of parameter range
+  private static final double MUTATION_SIGMA = 0.20;
 
-  // Reasonable bounds for FRC PID (tune if needed)
+  // Translational PID bounds (x, y position error)
   private static final double P_MIN_T = 0.0,  P_MAX_T = 10.0;
-  private static final double I_MIN_T = 0.0,  I_MAX_T =  .3;
-  private static final double D_MIN_T = 0.0,  D_MAX_T =  1.5;
+  private static final double I_MIN_T = 0.0,  I_MAX_T = 0.3;
+  private static final double D_MIN_T = 0.0,  D_MAX_T = 1.5;
 
+  // Rotational PID bounds (heading error)
   private static final double P_MIN_R = 0.0,  P_MAX_R = 10.0;
-  private static final double I_MIN_R = 0.0,  I_MAX_R =  1;
-  private static final double D_MIN_R = 0.0,  D_MAX_R =  1.5;
+  private static final double I_MIN_R = 0.0,  I_MAX_R = 1;
+  private static final double D_MIN_R = 0.0,  D_MAX_R = 1.5;
   
-  private static final double ALLOWABLE_COST = 2000.0; // if exceeded, abort path early
-  private static final double HIGH_COST_PENALTY = 1e6; // cost assigned to failed runs
+  // Cost threshold to abort path if exceeded
+  private static final double ALLOWABLE_COST = 2000.0;
+  // Penalty for failed runs
+  private static final double HIGH_COST_PENALTY = 1e6;
+  // Flag indicating high-cost abort occurred
   private boolean HIGH_COST_FLAG = false;
 
-
   // -------------------- STATE --------------------
+  // List of PathPlanner paths for evaluation
   private final List<PathPlannerPath> paths = new ArrayList<>();
+  // Reference to drive subsystem for path execution
   private final Drive drive;
+  // Current path index in evaluation
   private int pathIndex = 0;
+  // Currently executing path command
   private FollowPathCommand103 activeCmd;
+  // Home/reset command (for cleanup between paths)
   private Command homeCommand;
+  // Flag to enable/disable GA tuning
   private boolean running = false;
 
-  // Tunable controller (Optional provided to your builder)
+  // Tunable controller shared across evaluations
   private Optional<TunableHolonomicController> tunableController = Optional.empty();
 
-  // Genome = {transP, transI, transD, rotP, rotI, rotD}
+  // PID parameter container (6 values: trans P/I/D, rot P/I/D)
   private static class Genome {
-    double tP, tI, tD, rP, rI, rD;
+    // Translational PID gains
+    double tP, tI, tD;
+    // Rotational PID gains
+    double rP, rI, rD;
+    
     Genome(double tP, double tI, double tD, double rP, double rI, double rD) {
       this.tP = tP; this.tI = tI; this.tD = tD;
       this.rP = rP; this.rI = rI; this.rD = rD;
     }
+    
+    // Create independent copy for breeding
     Genome copy() { return new Genome(tP, tI, tD, rP, rI, rD); }
   }
 
+  // Individual candidate with genome and fitness (cost) metric
   private static class Individual {
+    // Genetic parameters
     Genome g;
-    double fitness = Double.POSITIVE_INFINITY; // lower is better (cost)
+    // Fitness score (lower is better, initialized to infinity)
+    double fitness = Double.POSITIVE_INFINITY;
+    
     Individual(Genome g) { this.g = g; }
   }
 
+  // Random number generator with fixed seed for reproducibility
   private final Random rng = new Random(2025);
 
+  // Current population of candidates
   private List<Individual> population = new ArrayList<>();
+  // Current generation number
   private int generation = 0;
+  // Index of individual being evaluated in current generation
   private int indIdx = 0;
+  // Accumulated cost across all paths for current individual
   private double accumCostForIndividual = 0.0;
 
-  // ------------- INITIAL GA SEED -------------
-  // your current defaults as a starting point
+  // Default seed values from last successful run
   private double seedTP = 5.0, seedTI = 0.0, seedTD = 0.0;
   private double seedRP = 5.0, seedRI = 0.0, seedRD = 0.0;
 
+  
+  // Initialize flowerTest command with drive subsystem reference
   public flowerTest(Drive drive) {
     this.drive = drive;
-    // resetPidPreferencesToDefaults();
+    // Load or initialize PID seed values from persistent storage
     loadSeedsFromPreferences();
 
-    // Controller instance (shared, but re-tuned per run)
+    // Create tunable controller with seed values
     tunableController = Optional.of(new TunableHolonomicController(
         seedTP, seedTI, seedTD,
         seedTP, seedTI, seedTD,
         seedRP, seedRI, seedRD,
-        FrameConstants.kPhysicalMaxAngularSpeedRadiansPerSecond, FrameConstants.kphysicalMaxAngularAccelerationRadiansPerSecond));
+        FrameConstants.kPhysicalMaxAngularSpeedRadiansPerSecond, 
+        FrameConstants.kphysicalMaxAngularAccelerationRadiansPerSecond));
 
     try {
+      // Load evaluation paths from PathPlanner files
       paths.add(PathPlannerPath.fromPathFile("W_1"));
       paths.add(PathPlannerPath.fromPathFile("W_2"));
       paths.add(PathPlannerPath.fromPathFile("W_3"));
       paths.add(PathPlannerPath.fromPathFile("W_4"));
       paths.add(PathPlannerPath.fromPathFile("W_5"));
       paths.add(PathPlannerPath.fromPathFile("W_6"));
-      // paths.add(PathPlannerPath.fromPathFile("PIDTuning2"));
-      // paths.add(PathPlannerPath.fromPathFile("PIDTuning2"));
-      // paths.add(PathPlannerPath.fromPathFile("PID_1"));
-      // paths.add(PathPlannerPath.fromPathFile("PID_2"));
 
+      // Verify correct number of paths loaded
       if (paths.size() != NUM_PATHS) {
         DriverStation.reportWarning("Expected " + NUM_PATHS + " paths; got " + paths.size(), false);
       }
     } catch (Exception e) {
       DriverStation.reportError("Error loading path: " + e.getMessage(), e.getStackTrace());
     }
-
-    // No subsystem requirements shown; add if your Drive is a requirement:
-    // addRequirements(drive);
   }
 
   // -------------------- PUBLIC CONTROL --------------------
+  // Enable/disable genetic algorithm tuning
   public void setRunning(boolean run) {
     running = run;
-  }
-
-  // -------------------- COMMAND LIFECYCLE --------------------
+  }  // -------------------- COMMAND LIFECYCLE --------------------
+  // Initialize GA population and begin first evaluation
   @Override
   public void initialize() {
-    // Initialize GA population
+    // Create initial population with elites and random candidates
     initPopulation();
     generation = 0;
     indIdx = 0;
     pathIndex = 0;
     accumCostForIndividual = 0.0;
 
-    // Kick off first evaluation run
+    // Apply first individual's genome and start evaluation
     applyGenome(population.get(indIdx).g);
     schedulePath(pathIndex);
   }
 
+  // Execute evaluation cycle: run paths, accumulate costs, advance generation
   @Override
-public void execute() {
-  if (!running || activeCmd == null) return;
+  public void execute() {
+    if (!running || activeCmd == null) return;
 
-  if (!activeCmd.isFinished()) {
-    double cost = activeCmd.getCostFunctionAccumulator();
-    if (cost > ALLOWABLE_COST) {
-      // Abort this path immediately
-      activeCmd.cancel();
-      drive.stopModules();                 // zero outputs now
-      HIGH_COST_FLAG = true;
-      pathIndex = NUM_PATHS - 1;    // fast-forward to end for this individual
-      return;                       // wait for next tick to process end-of-path bookkeeping
-    }
-    return; // still running normally
-  }
-
-  // From here on, the command has finished (or was canceled in a prior tick)
-  if (homeCommand == null || !homeCommand.isScheduled() || homeCommand.isFinished()) {
-    double cost = activeCmd.getCostFunctionAccumulator();
-
-    accumCostForIndividual += cost;
-    if (HIGH_COST_FLAG) {
-      accumCostForIndividual += HIGH_COST_PENALTY;
-      HIGH_COST_FLAG = false;
-    }
-
-    pathIndex++;
-
-    if (pathIndex < NUM_PATHS) {
-      schedulePath(pathIndex);
-      return;
-    }
-
-    if (pathIndex == NUM_PATHS) {
-        
-      // Finished evaluating this individual
-      population.get(indIdx).fitness = accumCostForIndividual;
-      var g = population.get(indIdx).g;
-
-      SmartDashboard.putNumber("PID/transP", g.tP);
-      SmartDashboard.putNumber("PID/transI", g.tI);
-      SmartDashboard.putNumber("PID/transD", g.tD);
-      SmartDashboard.putNumber("PID/rotP",   g.rP);
-      SmartDashboard.putNumber("PID/rotI",   g.rI);
-      SmartDashboard.putNumber("PID/rotD",   g.rD);
-      SmartDashboard.putNumber("PID/cost",   population.get(indIdx).fitness);
-
-      System.out.printf("\n[GA] Fitness=%.4f (sum of %d paths)\n", population.get(indIdx).fitness, NUM_PATHS);
-      SmartDashboard.putNumber("individualCost", cost);
-      SmartDashboard.putNumber("individualIndex", indIdx);
-
-      // Reset to home
-    //   Rotation2d homeRotation = paths.get(0).getGoalEndState().rotation();
-      Pose2d homePoint = paths.get(0).getPathPoses().get(0);
-      Pose2d startPoint = drive.getPose();
-      if(homePoint.minus(startPoint).getTranslation().getNorm() > 0.5){  
-        List<Pose2d> poses = new ArrayList<>();
-        poses.add(startPoint);
-        poses.add(homePoint);
-        // List<Waypoint> pts = PathPlannerPath.waypointsFromPoses(poses);
-        // PathPlannerPath homepath = new PathPlannerPath(
-        //         pts,
-        //         new PathConstraints(1.5, 1.5, 1.5, 1.5),
-        //         new IdealStartingState(0, startPoint.getRotation()),
-        //         new GoalEndState(0, homeRotation)
-        //     );
-
-        // TunableHolonomicController tempController = new TunableHolonomicController(
-        //     5, 0, 0, 5, 0, 0, 5, 0, 0, Math.toRadians(720), Math.toRadians(720));
-        PathConstraints constraints = new PathConstraints(
-        2, 1.0,
-           Math.PI/2, Math.PI/2);
-
-        // homeCommand = AutoBuilder.pathfindToPose(homePoint, constraints,0.0);
-        // // homeCommand = drive.PathCommandBuilder103(homepath, Optional.of(tempController))
-        // //                     .finallyDo(i -> drive.stopModules());  // <-- ensure stop on finish/cancel
-        // homeCommand.schedule();
-        }
-      return;
-    }
-
-    // Move to next individual
-    indIdx++;
-    if (indIdx < population.size()) {
-      pathIndex = 0;
-      accumCostForIndividual = 0.0;
-      applyGenome(population.get(indIdx).g);
-      schedulePath(pathIndex);
-    } else {
-      saveBestToPreferences();
-      evolvePopulation();
-      generation++;
-      if (generation >= GENERATIONS) {
-        running = false;
-        System.out.printf("[GA] Completed %d generations. Best saved to Preferences.", GENERATIONS);
+    // Path still executing - check for cost threshold
+    if (!activeCmd.isFinished()) {
+      double cost = activeCmd.getCostFunctionAccumulator();
+      // Abort if path performance degrades beyond threshold
+      if (cost > ALLOWABLE_COST) {
+        activeCmd.cancel();
+        drive.stopModules();
+        HIGH_COST_FLAG = true;
+        // Fast-forward to end of individual evaluation
+        pathIndex = NUM_PATHS - 1;
         return;
       }
-      indIdx = 0;
-      pathIndex = 0;
-      accumCostForIndividual = 0.0;
-      applyGenome(population.get(indIdx).g);
-      schedulePath(pathIndex);
+      return; // Continue path execution
+    }
+
+    // Path finished - handle end-of-path bookkeeping and progress to next
+    if (homeCommand == null || !homeCommand.isScheduled() || homeCommand.isFinished()) {
+      double cost = activeCmd.getCostFunctionAccumulator();
+
+      // Accumulate cost for this individual
+      accumCostForIndividual += cost;
+      if (HIGH_COST_FLAG) {
+        accumCostForIndividual += HIGH_COST_PENALTY;
+        HIGH_COST_FLAG = false;
+      }
+
+      pathIndex++;
+
+      // Schedule next path if available
+      if (pathIndex < NUM_PATHS) {
+        schedulePath(pathIndex);
+        return;
+      }
+
+      // Finished evaluating all paths for this individual
+      if (pathIndex == NUM_PATHS) {
+        population.get(indIdx).fitness = accumCostForIndividual;
+        var g = population.get(indIdx).g;
+
+        // Publish best PID values to SmartDashboard
+        SmartDashboard.putNumber("PID/transP", g.tP);
+        SmartDashboard.putNumber("PID/transI", g.tI);
+        SmartDashboard.putNumber("PID/transD", g.tD);
+        SmartDashboard.putNumber("PID/rotP", g.rP);
+        SmartDashboard.putNumber("PID/rotI", g.rI);
+        SmartDashboard.putNumber("PID/rotD", g.rD);
+        SmartDashboard.putNumber("PID/cost", population.get(indIdx).fitness);
+
+        System.out.printf("\n[GA] Fitness=%.4f (sum of %d paths)\n", 
+            population.get(indIdx).fitness, NUM_PATHS);
+        SmartDashboard.putNumber("individualCost", cost);
+        SmartDashboard.putNumber("individualIndex", indIdx);
+
+        return;
+      }
+
+      // Advance to next individual
+      indIdx++;
+      if (indIdx < population.size()) {
+        pathIndex = 0;
+        accumCostForIndividual = 0.0;
+        applyGenome(population.get(indIdx).g);
+        schedulePath(pathIndex);
+      } else {
+        // Generation complete - evolve to next generation
+        saveBestToPreferences();
+        evolvePopulation();
+        generation++;
+        
+        // Check if reached max generations
+        if (generation >= GENERATIONS) {
+          running = false;
+          System.out.printf("[GA] Completed %d generations. Best saved to Preferences.", GENERATIONS);
+          return;
+        }
+        
+        // Start evaluating new generation
+        indIdx = 0;
+        pathIndex = 0;
+        accumCostForIndividual = 0.0;
+        applyGenome(population.get(indIdx).g);
+        schedulePath(pathIndex);
+      }
     }
   }
-}
 
+  // Cleanup when command ends
   @Override
   public void end(boolean interrupted) {
     if (interrupted && activeCmd != null && activeCmd.isScheduled()) {
@@ -267,7 +381,9 @@ public void execute() {
     }
   }
 
+  
   // -------------------- EVALUATION --------------------
+  // Schedule path at index for execution
   private void schedulePath(int idx) {
     if (idx < 0 || idx >= paths.size()) {
       DriverStation.reportError("[GA] Bad path index " + idx, false);
@@ -277,8 +393,8 @@ public void execute() {
     activeCmd.schedule();
   }
 
+  // Push genome's PID gains into controller before path execution
   private void applyGenome(Genome g) {
-    // Push gains into the controller before scheduling any path
     tunableController.ifPresent(ctrl -> {
       ctrl.setTranslationGains(g.tP, g.tI, g.tD);
       ctrl.setRotationGains(g.rP, g.rI, g.rD);
@@ -286,19 +402,21 @@ public void execute() {
   }
 
   // -------------------- GA CORE --------------------
+  // Create initial population: best seed + variations + random
   private void initPopulation() {
     population.clear();
-    // Elites seeded around your current values + randoms
+    // Seed elite with current best and jittered variants
     population.add(new Individual(new Genome(seedTP, seedTI, seedTD, seedRP, seedRI, seedRD)));
     population.add(new Individual(jitterAround(seedTP, seedTI, seedTD, seedRP, seedRI, seedRD, 0.15)));
     population.add(new Individual(jitterAround(seedTP, seedTI, seedTD, seedRP, seedRI, seedRD, 0.15)));
 
-    // Fill remainder with random genomes within bounds
+    // Fill with random genomes within bounds
     while (population.size() < POP_SIZE) {
       population.add(new Individual(randomGenome()));
     }
   }
 
+  // Create genome with small random perturbations around a base
   private Genome jitterAround(double tP, double tI, double tD, double rP, double rI, double rD, double frac) {
     return new Genome(
         clamp(tP * (1 + randSym(frac)), P_MIN_T, P_MAX_T),
@@ -310,6 +428,7 @@ public void execute() {
     );
   }
 
+  // Create genome with all parameters randomly generated within bounds
   private Genome randomGenome() {
     return new Genome(
         randIn(P_MIN_T, P_MAX_T),
@@ -321,11 +440,12 @@ public void execute() {
     );
   }
 
+  // Evolve population: elitism, tournament selection, crossover, mutation
   private void evolvePopulation() {
-    // Sort by fitness (lower is better)
+    // Sort by fitness (lower cost is better)
     population.sort((a, b) -> Double.compare(a.fitness, b.fitness));
 
-    // Keep a copy of the best individual for reporting
+    // Report best individual of generation
     Individual best = population.get(0);
     DriverStation.reportWarning(String.format(
         "[GA] Gen %d best cost=%.5f  tP=%.3f tI=%.3f tD=%.3f  rP=%.3f rI=%.3f rD=%.3f",
@@ -333,7 +453,7 @@ public void execute() {
         best.g.tP, best.g.tI, best.g.tD, best.g.rP, best.g.rI, best.g.rD),
         false);
 
-    // Elitism
+    // Preserve elite individuals unchanged
     List<Individual> nextPop = new ArrayList<>();
     for (int i = 0; i < ELITES; i++) {
       nextPop.add(new Individual(population.get(i).g.copy()));
@@ -341,18 +461,22 @@ public void execute() {
 
     // Fill remainder via tournament selection + crossover + mutation
     while (nextPop.size() < POP_SIZE) {
+      // Select two parents via tournament
       Individual p1 = tournamentSelect(3);
       Individual p2 = tournamentSelect(3);
+      // Blend parent genomes
       Genome c = blendCrossover(p1.g, p2.g, 0.3);
+      // Introduce random mutations
       mutate(c);
       nextPop.add(new Individual(c));
     }
 
     population = nextPop;
-    // Reset fitness for next generation
+    // Reset fitness for next generation evaluation
     for (var ind : population) ind.fitness = Double.POSITIVE_INFINITY;
   }
 
+  // Tournament selection: pick k random candidates, return best
   private Individual tournamentSelect(int k) {
     Individual best = null;
     for (int i = 0; i < k; i++) {
@@ -362,16 +486,18 @@ public void execute() {
     return best;
   }
 
-  // BLX-alpha / blend-like crossover between two numbers
+  // BLX-alpha blend crossover: interpolate between two values with overshoot
   private double blend(double a, double b, double alpha, double min, double max) {
     double low = Math.min(a, b);
     double high = Math.max(a, b);
     double range = high - low;
+    // Expand range by alpha on both sides, then sample uniformly
     double lo = low - alpha * range;
     double hi = high + alpha * range;
     return clamp(randIn(lo, hi), min, max);
   }
 
+  // Crossover two genomes using blend crossover on each gene
   private Genome blendCrossover(Genome g1, Genome g2, double alpha) {
     return new Genome(
         blend(g1.tP, g2.tP, alpha, P_MIN_T, P_MAX_T),
@@ -383,8 +509,8 @@ public void execute() {
     );
   }
 
+  // Apply Gaussian mutation to each gene independently with specified probability
   private void mutate(Genome g) {
-    // Gaussian mutation applied per gene with probability
     if (rng.nextDouble() < MUTATION_RATE) g.tP = mutateGaussian(g.tP, P_MIN_T, P_MAX_T);
     if (rng.nextDouble() < MUTATION_RATE) g.tI = mutateGaussian(g.tI, I_MIN_T, I_MAX_T);
     if (rng.nextDouble() < MUTATION_RATE) g.tD = mutateGaussian(g.tD, D_MIN_T, D_MAX_T);
@@ -393,6 +519,7 @@ public void execute() {
     if (rng.nextDouble() < MUTATION_RATE) g.rD = mutateGaussian(g.rD, D_MIN_R, D_MAX_R);
   }
 
+  // Add Gaussian-distributed noise to a parameter value
   private double mutateGaussian(double val, double min, double max) {
     double range = max - min;
     double sigma = MUTATION_SIGMA * range;
@@ -401,13 +528,14 @@ public void execute() {
   }
 
   // -------------------- PERSIST BEST --------------------
+  // Save best individual's genome to persistent preferences
   private void saveBestToPreferences() {
     if (population == null || population.isEmpty()) return;
 
     var best = population.stream()
         .filter(ind -> !Double.isNaN(ind.fitness))
-        .min(Comparator.comparingDouble(ind -> ind.fitness))   // lower is better
-        .orElse(population.get(0)); // fallback
+        .min(Comparator.comparingDouble(ind -> ind.fitness))
+        .orElse(population.get(0));
   
     Genome g = best.g;
     Preferences.setDouble("PID/transP", g.tP);
@@ -417,69 +545,76 @@ public void execute() {
     Preferences.setDouble("PID/rotI", g.rI);
     Preferences.setDouble("PID/rotD", g.rD);
   }
-@SuppressWarnings("unused")
-private void DisplayBestPID() {
-  if (population == null || population.isEmpty()) return;
+  
+  // Display best individual's PID values on SmartDashboard
+  @SuppressWarnings("unused")
+  private void DisplayBestPID() {
+    if (population == null || population.isEmpty()) return;
 
-  var best = population.stream()
-      .filter(ind -> !Double.isNaN(ind.fitness))
-      .min(Comparator.comparingDouble(ind -> ind.fitness))   // lower is better
-      .orElse(population.get(0)); // fallback
+    var best = population.stream()
+        .filter(ind -> !Double.isNaN(ind.fitness))
+        .min(Comparator.comparingDouble(ind -> ind.fitness))
+        .orElse(population.get(0));
 
-  Genome g = best.g;
+    Genome g = best.g;
 
-  SmartDashboard.putNumber("PID/transP", g.tP);
-  SmartDashboard.putNumber("PID/transI", g.tI);
-  SmartDashboard.putNumber("PID/transD", g.tD);
-  SmartDashboard.putNumber("PID/rotP",   g.rP);
-  SmartDashboard.putNumber("PID/rotI",   g.rI);
-  SmartDashboard.putNumber("PID/rotD",   g.rD);
-  SmartDashboard.putNumber("PID/cost",   best.fitness);
-}
+    SmartDashboard.putNumber("PID/transP", g.tP);
+    SmartDashboard.putNumber("PID/transI", g.tI);
+    SmartDashboard.putNumber("PID/transD", g.tD);
+    SmartDashboard.putNumber("PID/rotP", g.rP);
+    SmartDashboard.putNumber("PID/rotI", g.rI);
+    SmartDashboard.putNumber("PID/rotD", g.rD);
+    SmartDashboard.putNumber("PID/cost", best.fitness);
+  }
 
-
-  // -------------------- UTILS --------------------
+  // -------------------- UTILITIES --------------------
+  // Clamp value between min and max bounds
   private double clamp(double v, double min, double max) {
     return Math.max(min, Math.min(max, v));
   }
+  
+  // Random value uniformly distributed in [min, max]
   private double randIn(double min, double max) {
     return min + rng.nextDouble() * (max - min);
   }
+  
+  // Random value uniformly distributed in [-magnitude, +magnitude]
   private double randSym(double magnitude) {
-    return (rng.nextDouble() * 2 - 1) * magnitude; // [-mag, +mag]
+    return (rng.nextDouble() * 2 - 1) * magnitude;
   }
   
-    private void loadSeedsFromPreferences() {
-    // If keys don't exist yet, publish the current defaults so you can see them
-        if (!Preferences.containsKey("PID/transP")) Preferences.setDouble("PID/transP", seedTP);
-        if (!Preferences.containsKey("PID/transI")) Preferences.setDouble("PID/transI", seedTI);
-        if (!Preferences.containsKey("PID/transD")) Preferences.setDouble("PID/transD", seedTD);
-        if (!Preferences.containsKey("PID/rotP"))   Preferences.setDouble("PID/rotP",  seedRP);
-        if (!Preferences.containsKey("PID/rotI"))   Preferences.setDouble("PID/rotI",  seedRI);
-        if (!Preferences.containsKey("PID/rotD"))   Preferences.setDouble("PID/rotD",  seedRD);
+  // Load PID seed values from persistent preferences or initialize with defaults
+  private void loadSeedsFromPreferences() {
+    // Initialize preferences if keys don't exist
+    if (!Preferences.containsKey("PID/transP")) Preferences.setDouble("PID/transP", seedTP);
+    if (!Preferences.containsKey("PID/transI")) Preferences.setDouble("PID/transI", seedTI);
+    if (!Preferences.containsKey("PID/transD")) Preferences.setDouble("PID/transD", seedTD);
+    if (!Preferences.containsKey("PID/rotP"))   Preferences.setDouble("PID/rotP", seedRP);
+    if (!Preferences.containsKey("PID/rotI"))   Preferences.setDouble("PID/rotI", seedRI);
+    if (!Preferences.containsKey("PID/rotD"))   Preferences.setDouble("PID/rotD", seedRD);
     
-        // Read back (with current seed as fallback)
-        seedTP = sanitize(Preferences.getDouble("PID/transP", seedTP), 0.0, 18.0);
-        seedTI = sanitize(Preferences.getDouble("PID/transI", seedTI), 0.0,  1.0);
-        seedTD = sanitize(Preferences.getDouble("PID/transD", seedTD), 0.0,  2.5);
+    // Read values and sanitize them
+    seedTP = sanitize(Preferences.getDouble("PID/transP", seedTP), 0.0, 18.0);
+    seedTI = sanitize(Preferences.getDouble("PID/transI", seedTI), 0.0, 1.0);
+    seedTD = sanitize(Preferences.getDouble("PID/transD", seedTD), 0.0, 2.5);
     
-        seedRP = sanitize(Preferences.getDouble("PID/rotP",  seedRP), 0.0, 18.0);
-        seedRI = sanitize(Preferences.getDouble("PID/rotI",  seedRI), 0.0,  1.0);
-        seedRD = sanitize(Preferences.getDouble("PID/rotD",  seedRD), 0.0,  3.0);
-    }
-    
-  private double sanitize(double v, double min, double max) {
-        if (Double.isNaN(v) || Double.isInfinite(v)) return min;
-        return Math.max(min, Math.min(max, v));
-    }
+    seedRP = sanitize(Preferences.getDouble("PID/rotP", seedRP), 0.0, 18.0);
+    seedRI = sanitize(Preferences.getDouble("PID/rotI", seedRI), 0.0, 1.0);
+    seedRD = sanitize(Preferences.getDouble("PID/rotD", seedRD), 0.0, 3.0);
+  }
   
-public static void resetPidPreferencesToDefaults() {
+  // Validate value is not NaN/infinite and within bounds
+  private double sanitize(double v, double min, double max) {
+    if (Double.isNaN(v) || Double.isInfinite(v)) return min;
+    return Math.max(min, Math.min(max, v));
+  }
+  
+  // Reset all PID preferences to default values
+  public static void resetPidPreferencesToDefaults() {
     Preferences.setDouble("PID/transP", 5.0);
     Preferences.setDouble("PID/transI", 0.0);
     Preferences.setDouble("PID/transD", 0.0);
-    Preferences.setDouble("PID/rotP",   5.0);
-    Preferences.setDouble("PID/rotI",   0.0);
-    Preferences.setDouble("PID/rotD",   0.0);
-  }
-  
-}
+    Preferences.setDouble("PID/rotP", 5.0);
+    Preferences.setDouble("PID/rotI", 0.0);
+    Preferences.setDouble("PID/rotD", 0.0);
+  }}
